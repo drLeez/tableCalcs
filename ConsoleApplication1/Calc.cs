@@ -1,9 +1,8 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Text;
-using System.Threading.Tasks;
 
 namespace ConsoleApplication1
 {
@@ -15,16 +14,31 @@ namespace ConsoleApplication1
         public CalcException(int pos, string message, Exception innerException) : base(message, innerException) { Pos = pos; }
         public override string ToString() => base.ToString() + " : " + Pos;
     }
+    internal class CalcWrapper<T>
+    {
+        public T Obj;
+        public double CalcKey;
+        public CalcWrapper(T o, double k)
+        {
+            Obj = o;
+            CalcKey = k;
+        }
+    }
     internal class ReflectInfo
     {
         public FieldInfo f;
         public PropertyInfo p;
-        public ReflectInfo(Type t, string s)
+        public ReflectInfo(Type t, string s, Type w = null)
         {
+            if(w != null) t = w;
             f = t.GetField(s);
             if (f == null) p = t.GetProperty(s);
         }
-        public object GetValue(object o) => p == null ? f.GetValue(o) : p.GetValue(o, null);
+        public object GetValue(object o, Type w)
+        {
+            if (w != null) o = o.GetType().GetField("Obj").GetValue(o);
+            return p == null ? f.GetValue(o) : p.GetValue(o, null);
+        }
     }
     public class Result
     {
@@ -61,7 +75,7 @@ namespace ConsoleApplication1
             for (int i = 0; i < FuncNames.Length; i++) if (FuncNames[i] == name) return i;
             return -1;
         }
-        private static double ConvertDouble(int i, Object o, bool date)
+        private static double ConvertDouble(int i, object o, bool date)
         {
             try
             {
@@ -79,19 +93,35 @@ namespace ConsoleApplication1
         }
 
         private List<T> Items;
-        private string Key, Form;
-        private string[] Props;
-        private bool keyDate;
-        public Calc(string[] props, List<T> items = null)
+        private Type WrapType = null;
+        private string Form;
+        private readonly string Key;
+        //private readonly string[] Props;
+        private readonly Dictionary<string, string> Props;
+        private readonly bool keyDate;
+        public Calc(Dictionary<string, string> props, string[] directs = null, bool makeKey = false)
         {
-            Items = items;
-            Key = props[0];
-            keyDate = Key.ToLower().Contains("date");
+            if(props == null) props = new Dictionary<string, string>();
+            if(directs != null) foreach (var p in directs) props[p] = p;
+            if (props.Count == 0) return;
+            Key = (makeKey) ? null : props.Values.First();
+            if(!makeKey) keyDate = Key.ToLower().Contains("date");
             Props = props;
         }
         public Result Do(string form, List<T> items = null)
         {
             if (items.Count == 0) return null;
+            if (Key == null)
+            {
+                var newProps = new Dictionary<string, string>();
+                newProps["CalcKey"] = "CalcKey";
+                foreach (var k in Props.Keys) newProps[k] = Props[k];
+                var newItems = new List<CalcWrapper<T>>();
+                double count = 0;
+                foreach (var i in items) newItems.Add(new CalcWrapper<T>(i, count++));
+                var newCalc = new Calc<CalcWrapper<T>>(newProps) { WrapType = items.First().GetType() };
+                return newCalc.Do(form, newItems);
+            }
             Items = items;
             Form = form;
             try
@@ -181,6 +211,7 @@ namespace ConsoleApplication1
             return new Result(ret);
         }
         private static readonly double? DNULL = (double?) null;
+        private readonly Type Typ = typeof(T);
         private int propSave;
         private bool filtDate, propDate;
         private Result GetRange(int start, out int i)
@@ -194,13 +225,14 @@ namespace ConsoleApplication1
             double? b, e;
             bool exb = false, exe = false;
 
-            var Typ = Items.First().GetType();
-            var K = new ReflectInfo(Typ, Key);
-            var P = new ReflectInfo(Typ, prop);
+            start += prop.Length;
+            if (!Props.TryGetValue(prop, out prop)) throw new CalcException(start - prop.Length, "Unrecognized field name");
             propDate = prop.ToLower().Contains("date");
+
+            var K = new ReflectInfo(Typ, Key, null);
+            var P = new ReflectInfo(Typ, prop, WrapType);
             ReflectInfo F;
 
-            start += prop.Length;
             while (++start < Form.Length && Form[start] == '[')
             {
                 if (Form[++start] == 'E') exb = ++start > 0;
@@ -209,21 +241,21 @@ namespace ConsoleApplication1
                 end = Eval(out start, start, -2);
                 filt = Form.Substring(++start, Form.IndexOf(']', start) - start);
                 start += filt.Length;
-                if (!Props.Contains(filt = filt.Trim())) throw new CalcException(start-filt.Length, "Unrecognized field name");
+                if(!Props.TryGetValue(filt.Trim(), out filt)) throw new CalcException(start - filt.Length, "Unrecognized field name");
                 filtDate = filt.ToLower().Contains("date");
 
                 b = beg == null ? DNULL : beg.value;
                 e = end == null ? DNULL : end.value;
-                F = new ReflectInfo(Typ, filt.Length > 0 ? filt : prop);
+                F = new ReflectInfo(Typ, filt.Length > 0 ? filt : prop, WrapType);
                 filtered = filtered.Where(x =>
                 {
-                    rcomp = ConvertDouble(start, F.GetValue(x), filtDate);
+                    rcomp = ConvertDouble(start, F.GetValue(x, WrapType), filtDate);
                     return (b == null || (exb ? rcomp > b : rcomp >= b)) && (e == null || (exe ? rcomp < e : rcomp <= e));
                 }).ToList();
             }
             foreach (var x in filtered)
             {
-                newDict[ConvertDouble(0, K.GetValue(x), keyDate)] = ConvertDouble(propSave, P.GetValue(x), propDate);
+                newDict[ConvertDouble(0, K.GetValue(x, null), keyDate)] = ConvertDouble(propSave, P.GetValue(x, WrapType), propDate);
             }
             i = start - 1;
             return new Result(newDict, prop);
