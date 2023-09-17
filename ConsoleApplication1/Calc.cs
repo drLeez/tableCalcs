@@ -28,9 +28,8 @@ namespace ConsoleApplication1
     {
         public FieldInfo f;
         public PropertyInfo p;
-        public ReflectInfo(Type t, string s, Type w = null)
+        public ReflectInfo(Type t, string s)
         {
-            if(w != null) t = w;
             f = t.GetField(s);
             if (f == null) p = t.GetProperty(s);
         }
@@ -45,6 +44,7 @@ namespace ConsoleApplication1
         public Dictionary<double, double> range = new Dictionary<double, double>();
         public string prop;
         public double value => range.Values.First();
+
         public Result(Dictionary<double, double> rr, string p) //set range
         {
             if (p == null) throw new Exception();
@@ -57,24 +57,31 @@ namespace ConsoleApplication1
             range.Clear();
             range[0] = v;
         }
+        public bool IsString()
+        {
+            return range == null && prop != null;
+        }
         public bool IsRange()
         {
-            return !IsEmpty() && prop != null;
-        }
-        public bool IsEmpty()
-        {
-            return range.Count() == 0;
+            return range != null && range.Count() > 0 && prop != null;
         }
     }
     public class Calc<T>
     {
-        private static readonly string[] FuncNames = new string[] { "SUM", "AVG", "MED", "MODE", null, null, null, null, null, null, 
+        private static readonly string[] FuncNames = new string[] { "SUM", "AVG", "MED", "MODE", null, null, null, null, null, null,
                                                                     "ROUND", "FLOOR", "CEIL", "NEG"};
         private static int FuncIndex(string name)
         {
             for (int i = 0; i < FuncNames.Length; i++) if (FuncNames[i] == name) return i;
             return -1;
         }
+        private static readonly string Comps = "<>!";
+        private static int CompIndex(StringBuilder s)
+        {
+            if (s.Length == 0 || (s.Length == 1 && s[0] == '!') || (s.Length == 2 && s[1] != '=')) return -1; 
+            return Comps.IndexOf(s[0]) + (s.Length == 1 ? 4 : 0);
+        }
+        private static bool IsComp(char c) => c == '<' || c == '>' || c == '!' || c == '=';
         private static double ConvertDouble(int i, object o, bool date)
         {
             try
@@ -86,7 +93,7 @@ namespace ConsoleApplication1
                 }
                 return Convert.ToDouble(o);
             }
-            catch(FormatException)
+            catch (FormatException)
             {
                 throw new CalcException(i, "Invalid expression");
             }
@@ -101,11 +108,11 @@ namespace ConsoleApplication1
         private readonly bool keyDate;
         public Calc(Dictionary<string, string> props, string[] directs = null, bool makeKey = false)
         {
-            if(props == null) props = new Dictionary<string, string>();
-            if(directs != null) foreach (var p in directs) props[p] = p;
+            if (props == null) props = new Dictionary<string, string>();
+            if (directs != null) foreach (var p in directs) props[p] = p;
             if (props.Count == 0) return;
-            Key = (makeKey) ? null : props.Values.First();
-            if(!makeKey) keyDate = Key.ToLower().Contains("date");
+            Key = makeKey ? null : props.Values.First();
+            if (!makeKey) keyDate = Key.ToLower().Contains("date");
             Props = props;
         }
         public Result Do(string form, List<T> items = null)
@@ -128,12 +135,12 @@ namespace ConsoleApplication1
             {
                 return Eval(out int i);
             }
-            catch(CalcException e)
+            catch (CalcException e)
             {
                 Console.WriteLine(e.ToString());
                 //render display using the message and char position in input string
             }
-            catch(Exception e)
+            catch (Exception e)
             {
                 Console.WriteLine(e.ToString());
                 //render display with generic "Calculation Error."
@@ -155,12 +162,12 @@ namespace ConsoleApplication1
             return 0;
         }
         private static double hasValue;
-        private static Result Apply(int i ,Result left, char op, Result right)
+        private static Result Apply(int i, Result left, char op, Result right)
         {
-            if (op == ' ' && left == null) return right;
-            else if(op == ' ' || left == null) throw new CalcException(i, "Operation out of order"); //values out of order!
+            if (op == ZCHAR && left == null) return right;
+            else if (op == ZCHAR || left == null) throw new CalcException(i, "Operation out of order"); //values out of order!
             Result OneRange, OneSingle;
-            if(left.IsRange() && right.IsRange()) // range + range [LEFT HAND DOMINANT]
+            if (left.IsRange() && right.IsRange()) // range + range [LEFT HAND DOMINANT]
             {
                 var newDict = new Dictionary<double, double>();
                 foreach (var x in left.range.Keys)
@@ -174,12 +181,25 @@ namespace ConsoleApplication1
                 if (OneRange == right && (op == 1 || op == 3)) throw new CalcException(i, "Cannot subtract or divide a range from a single value");
                 OneSingle = OneRange == right ? left : right;
                 var newDict = new Dictionary<double, double>();
-                foreach(var x in OneRange.range.Keys) newDict[x] = SingleApply(OneRange.range[x], op, OneSingle.value);
+                foreach (var x in OneRange.range.Keys) newDict[x] = SingleApply(OneRange.range[x], op, OneSingle.value);
                 return new Result(newDict, OneRange.prop);
             }
             else // single + single
             {
                 return new Result(SingleApply(left.value, op, right.value));
+            }
+        }
+        private static bool Comp(double left, int comp, double right)
+        {
+            switch (comp)
+            {
+                case 0: return left <= right;
+                case 1: return left >= right;
+                case 2: return left != right;
+                case 3: return left == right;
+                case 4: return left < right;
+                case 5: return left > right;
+                default: return false;
             }
         }
 
@@ -201,7 +221,7 @@ namespace ConsoleApplication1
                 }
                 else
                 {
-                    ret += Convert.ToInt32(Form[start])-48;
+                    ret += Convert.ToInt32(Form[start]) - 48;
                     ret *= 10;
                 }
                 start++;
@@ -210,48 +230,91 @@ namespace ConsoleApplication1
             if (dec == 1) ret /= 10;
             return new Result(ret);
         }
-        private static readonly double? DNULL = (double?) null;
+        private static readonly double? DNULL = (double?)null;
         private readonly Type Typ = typeof(T);
+        private readonly StringBuilder comp = new StringBuilder(2);
         private int propSave;
-        private bool filtDate, propDate;
+        private bool lDate, rDate, propDate;
         private Result GetRange(int start, out int i)
         {
             List<T> filtered = Items;
             var newDict = new Dictionary<double, double>();
             propSave = start;
-            string prop = Form.Substring(++start, Form.IndexOf('"', start) - start), filt;
+            string prop = Form.Substring(++start, Form.IndexOf('"', start) - start);
             Result beg, end;
-            double rcomp;
-            double? b, e;
-            bool exb = false, exe = false;
+            double lcomp, rcomp;
 
             start += prop.Length;
             if (!Props.TryGetValue(prop, out prop)) throw new CalcException(start - prop.Length, "Unrecognized field name");
             propDate = prop.ToLower().Contains("date");
 
-            var K = new ReflectInfo(Typ, Key, null);
-            var P = new ReflectInfo(Typ, prop, WrapType);
-            ReflectInfo F;
+            var K = new ReflectInfo(Typ, Key);
+            var P = new ReflectInfo(WrapType ?? Typ, prop);
+            string ls, rs;
+            int ct;
+            ReflectInfo L, R;
 
             while (++start < Form.Length && Form[start] == '[')
             {
-                if (Form[++start] == 'E') exb = ++start > 0;
-                beg = Eval(out start, start, -2);
-                if (Form[++start] == 'E') exe = ++start > 0;
+                comp.Clear();
+                beg = Eval(out start, ++start, -2);
+                if (!beg.IsString() && !beg.IsRange()) start--;
+                while (++start < Form.Length && (Form[start] == ' ' || IsComp(Form[start])))
+                    try
+                    {
+                        if(Form[start] != ' ') comp.Append(Form[start]);
+                    }
+                    catch (ArgumentOutOfRangeException)
+                    {
+                        throw new CalcException(start, "Invalid comparisson symbol");
+                    }
+                if ((ct = CompIndex(comp)) == -1) throw new CalcException(start, "Invalid comparisson symbol");
                 end = Eval(out start, start, -2);
-                filt = Form.Substring(++start, Form.IndexOf(']', start) - start);
-                start += filt.Length;
-                if(!Props.TryGetValue(filt.Trim(), out filt)) throw new CalcException(start - filt.Length, "Unrecognized field name");
-                filtDate = filt.ToLower().Contains("date");
 
-                b = beg == null ? DNULL : beg.value;
-                e = end == null ? DNULL : end.value;
-                F = new ReflectInfo(Typ, filt.Length > 0 ? filt : prop, WrapType);
-                filtered = filtered.Where(x =>
+                if (beg.IsString() && end.IsString()) // range + range comp
                 {
-                    rcomp = ConvertDouble(start, F.GetValue(x, WrapType), filtDate);
-                    return (b == null || (exb ? rcomp > b : rcomp >= b)) && (e == null || (exe ? rcomp < e : rcomp <= e));
-                }).ToList();
+                    if (beg == SPECRES) ls = prop;
+                    else if(!Props.TryGetValue(beg.prop.Trim(), out ls)) throw new CalcException(start, "Unrecognized field name");
+                    if (end == SPECRES)
+                    {
+                        start++;
+                        rs = prop;
+                    }
+                    else if (!Props.TryGetValue(end.prop.Trim(), out rs)) throw new CalcException(start, "Unrecognized field name");
+                    if (ls == rs) throw new CalcException(start, "Comparing field to itself");
+                    lDate = ls.ToLower().Contains("date");
+                    rDate = rs.ToLower().Contains("date");
+                    L = new ReflectInfo(WrapType ?? Typ, ls);
+                    R = new ReflectInfo(WrapType ?? Typ, rs);
+                    filtered = filtered.Where(x =>
+                    {
+                        lcomp = ConvertDouble(start, L.GetValue(x, WrapType), lDate);
+                        rcomp = ConvertDouble(start, R.GetValue(x, WrapType), rDate);
+                        return Comp(lcomp, ct, rcomp);
+                    }).ToList();
+                }
+                else if (beg.IsString() || end.IsString()) // range + single comp
+                {
+                    var temp = beg.IsString() ? beg : end;
+                    //ls = temp == SPECRES ? prop : temp.prop.Trim();
+                    if (temp == SPECRES) ls = prop;
+                    else if (!Props.TryGetValue(temp.prop.Trim(), out ls)) throw new CalcException(start, "Unrecognized field name");
+                    lDate = ls.ToLower().Contains("date");
+                    L = new ReflectInfo(WrapType ?? Typ, ls);
+                    var single = (beg.IsString() ? end : beg).value;
+                    if (end.IsString()) // need to flip ct
+                    {
+                        if (ct < 2) ct = -(ct - 1);
+                        else if (ct > 3) ct = 4 - (ct - 5);
+                        if (end == SPECRES) start++;
+                    }
+                    filtered = filtered.Where(x =>
+                    {
+                        lcomp = ConvertDouble(start, L.GetValue(x, WrapType), lDate);
+                        return Comp(lcomp, ct, single);
+                    }).ToList();
+                }
+                else throw new CalcException(start , "Cannot compare two single values for range bounds");
             }
             foreach (var x in filtered)
             {
@@ -261,40 +324,48 @@ namespace ConsoleApplication1
             return new Result(newDict, prop);
         }
 
+        private static readonly Result SPECRES = new Result(null, "");
+        private static readonly char ZCHAR = (char)0;
         private double keySave;
         public Result Eval(out int end, int i = 0, int func = -1)
         {
-            char op = ' ';
+            char op = ZCHAR;
             Result result = null;
-            StringBuilder funcName = new StringBuilder("");
+            StringBuilder word = new StringBuilder("");
             for (; i < Form.Length; i++)
             {
-                if (Form[i] >= 'A' && Form[i] <= 'Z')
+                if ((Form[i] >= 'a' && Form[i] <= 'z') || (Form[i] >= 'A' && Form[i] <= 'Z'))
                 {
-                    funcName.Append(Form[i]);
+                    word.Append(Form[i]);
                 }
                 else if ((Form[i] >= '0' && Form[i] <= '9') || Form[i] == '.') // lets ignore the possibility of negative numbers for now!
                 {
                     result = Apply(i, result, op, GetNum(i, out i));
-                    op = ' ';
+                    op = ZCHAR;
                 }
                 else
                 {
                     switch (Form[i])
                     {
-                        case ' ': break; //ignore spaces
+                        case ' ': continue; //ignore spaces (keep word built)
+                        case '[': throw new CalcException(i, "Bracket out of place");
                         case '(':
-                            result = Apply(i, result, op, Eval(out i, i + 1, FuncIndex(funcName.ToString())));
-                            op = ' ';
+                            result = Apply(i, result, op, Eval(out i, i + 1, FuncIndex(word.ToString())));
+                            op = ZCHAR;
                         break;
-                        case ')': case ',':
-                            if(func == -2)
+                        case ')': case '<': case '>': case '=': case '!': case ']':
+                            if (func == -2)
                             {
-                                if (result != null && result.IsRange()) throw new CalcException(i, "Cannot use a range as boundary for another range");
+                                //if (result != null && result.IsRange()) throw new CalcException(i, "Cannot use a range as boundary for another range");
+                                if (result == null && word.ToString() == "this")
+                                {
+                                    i--;
+                                    result = SPECRES;
+                                }
                                 end = i;
                                 return result;
                             }
-                            else if(Form[i] == ',') throw new CalcException(i, "Comma out of place");
+                            else if (Form[i] != ')') throw new CalcException(i, "Comparing outside of range definition");
                             if (result == null) throw new CalcException(i, "Reached closing parenthesis without value");
                             if (result.IsRange()) switch (func)
                             {
@@ -333,7 +404,7 @@ namespace ConsoleApplication1
                                     foreach (var k in result.range.Keys) result.range[k] = -result.range[k];
                                 break;
                             }
-                            else if(func > 9)
+                            else if (func > 9)
                             {
                                 keySave = result.range.Keys.First();
                                 switch (func)
@@ -353,20 +424,27 @@ namespace ConsoleApplication1
                                 }
                             }
                             else throw new CalcException(i, "Cannot apply reducing functions to single values");
-                            end = i + 1;
-                        return result;
+                            end = i;
+                            return result;
                         case '"':
-                            result = Apply(i, result, op, GetRange(i, out i));
-                            op = ' ';
+                            if (func == -2)
+                            {
+                                var filt = Form.Substring(++i, Form.IndexOf('"', i) - i);
+                                result = new Result(null, filt.Trim());
+                                end = i + filt.Length;
+                                return result;
+                            }
+                            else result = Apply(i, result, op, GetRange(i, out i));
+                            op = ZCHAR;
                         break;
                         case '+': case '-': case '*': case '/':
                             op = Form[i];
                         break;
                     }
-                    funcName.Clear();
+                    word.Clear();
                 }
             }
-            if (op != ' ') throw new CalcException(i, "Ending formula with an operator");
+            if (op != ZCHAR) throw new CalcException(i, "Ending formula with an operator");
             end = i;
             return result;
         }
