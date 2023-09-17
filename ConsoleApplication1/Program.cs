@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 
-namespace ConsoleApplication1 {
-    class Program {
-        
+namespace ConsoleApplication1
+{
+    class Program
+    {
+
         internal class Record
         {
             static int ID = 0;
@@ -18,8 +20,9 @@ namespace ConsoleApplication1 {
                 age = a;
             }
         }
-        
-        static void Main(string[] args) {
+
+        static void Main(string[] args)
+        {
 
             var list = new List<Record>
             {
@@ -31,7 +34,8 @@ namespace ConsoleApplication1 {
 
             var calc = new Calc<Record>(new Dictionary<string, string> { { "Id", "id" }, { "Age", "age" } }, null, true);
 
-            var total = calc.Do("NEG(9) + SUM(\"Age\"[,2,Id][20,,Age]) / 2", list);
+            var total = calc.Do("NEG(9) + SUM(\"Age\"[\"Id\" <= 2][20 <= this]) / 2", list);
+
             Console.WriteLine(total);
         }
     }
