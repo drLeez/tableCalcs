@@ -1,5 +1,9 @@
 using System;
+using System.CodeDom;
+using System.Collections;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics.SymbolStore;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -41,9 +45,22 @@ namespace ConsoleApplication1
     }
     public class Result
     {
+        public static readonly Dictionary<double, double> SPECDICT = new Dictionary<double, double>();
         public Dictionary<double, double> range = new Dictionary<double, double>();
         public string prop;
         public double value => range.Values.First();
+
+        public static bool UnknownValue(int i, Result r, out object ret)
+        {
+            //if (r.IsRange() || r.IsString()) throw new CalcException(i, "");
+            if (r.range == SPECDICT)
+            {
+                ret = r.prop;
+                return false;
+            }
+            ret = r.value;
+            return true;
+        }
 
         public Result(Dictionary<double, double> rr, string p) //set range
         {
@@ -63,7 +80,7 @@ namespace ConsoleApplication1
         }
         public bool IsRange()
         {
-            return range != null && range.Count() > 0 && prop != null;
+            return range != null && range != SPECDICT && prop != null;
         }
     }
     public class Calc<T>
@@ -78,10 +95,20 @@ namespace ConsoleApplication1
         private static readonly string Comps = "<>!";
         private static int CompIndex(StringBuilder s)
         {
-            if (s.Length == 0 || (s.Length == 1 && s[0] == '!') || (s.Length == 2 && s[1] != '=')) return -1; 
+            if (s.Length == 0 || (s.Length == 1 && s[0] == '!') || (s.Length == 2 && s[1] != '=')) return -1;
             return Comps.IndexOf(s[0]) + (s.Length == 1 ? 4 : 0);
         }
         private static bool IsComp(char c) => c == '<' || c == '>' || c == '!' || c == '=';
+        private static bool ConvertUnknown(int i, object o, bool date, out object ret)
+        {
+            if (date || (Nullable.GetUnderlyingType(o.GetType()) ?? o.GetType()).IsPrimitive)
+            {
+                ret = ConvertDouble(i, o, date);
+                return true;
+            }
+            ret = o.ToString();
+            return false;
+        }
         private static double ConvertDouble(int i, object o, bool date)
         {
             try
@@ -98,6 +125,19 @@ namespace ConsoleApplication1
                 throw new CalcException(i, "Invalid expression");
             }
         }
+        private List<T> Merge(List<T> a, List<T> b, ReflectInfo K)
+        {
+            bool p;
+            double x;
+            foreach (var i in b)
+            {
+                p = true;
+                x = ConvertDouble(0, K.GetValue(i, null), false);
+                foreach (var n in a) if (ConvertDouble(0, K.GetValue(n, null), false) == x) { p = false; break; }
+                if (p) a.Add(i);
+            }
+            return a;
+        }
 
         private List<T> Items;
         private Type WrapType = null;
@@ -110,6 +150,16 @@ namespace ConsoleApplication1
         {
             if (props == null) props = new Dictionary<string, string>();
             if (directs != null) foreach (var p in directs) props[p] = p;
+            if (props.Count == 0) return;
+            Key = makeKey ? null : props.Values.First();
+            if (!makeKey) keyDate = Key.ToLower().Contains("date");
+            Props = props;
+        }
+        public Calc(string[] excludes = null, bool makeKey = false)
+        {
+            var props = new Dictionary<string, string>();
+            foreach (var f in Typ.GetFields()) if (excludes == null || !excludes.Contains(f.Name)) props[f.Name] = f.Name;
+            foreach (var p in Typ.GetProperties()) if (excludes == null || !excludes.Contains(p.Name)) props[p.Name] = p.Name;
             if (props.Count == 0) return;
             Key = makeKey ? null : props.Values.First();
             if (!makeKey) keyDate = Key.ToLower().Contains("date");
@@ -148,7 +198,6 @@ namespace ConsoleApplication1
             }
             return null;
         }
-
         private static double SingleApply(double left, char op, double right)
         {
             switch (op)
@@ -180,16 +229,27 @@ namespace ConsoleApplication1
             {
                 if (OneRange == right && (op == 1 || op == 3)) throw new CalcException(i, "Cannot subtract or divide a range from a single value");
                 OneSingle = OneRange == right ? left : right;
+                if (OneSingle.IsString()) throw new CalcException(i, "Cannot apply a string value on a range");
                 var newDict = new Dictionary<double, double>();
                 foreach (var x in OneRange.range.Keys) newDict[x] = SingleApply(OneRange.range[x], op, OneSingle.value);
                 return new Result(newDict, OneRange.prop);
             }
             else // single + single
             {
+                if (left.IsString() || right.IsString()) throw new CalcException(i, "Cannot apply operation on string values");
                 return new Result(SingleApply(left.value, op, right.value));
             }
         }
-        private static bool Comp(double left, int comp, double right)
+        private static bool CompString(string left, int comp, string right)
+        {
+            switch (comp)
+            {
+                case 2: return left != right;
+                case 3: return left == right;
+                default: throw new ArgumentException();
+            }
+        }
+        private static bool CompDouble(double left, int comp, double right)
         {
             switch (comp)
             {
@@ -199,7 +259,20 @@ namespace ConsoleApplication1
                 case 3: return left == right;
                 case 4: return left < right;
                 case 5: return left > right;
-                default: return false;
+                default: throw new ArgumentException();
+            }
+        }
+        private static bool Comp(int i, bool lDub, object lcomp, int ct, bool rDub, object rcomp)
+        {
+            if (lDub ^ rDub) throw new CalcException(i, "Comparing string and numeric values");
+            try
+            {
+                if (lDub) return CompDouble((double)lcomp, ct, (double)rcomp);
+                return CompString((string)lcomp, ct, (string)rcomp);
+            }
+            catch (ArgumentException)
+            {
+                throw new CalcException(i, "Invalid comparison operator");
             }
         }
 
@@ -237,12 +310,13 @@ namespace ConsoleApplication1
         private bool lDate, rDate, propDate;
         private Result GetRange(int start, out int i)
         {
-            List<T> filtered = Items;
+            List<T> filtered = Items, newFiltered;
             var newDict = new Dictionary<double, double>();
             propSave = start;
-            string prop = Form.Substring(++start, Form.IndexOf('"', start) - start);
+            string prop = Form.Substring(++start, Form.IndexOf('\'', start) - start);
             Result beg, end;
-            double lcomp, rcomp;
+            object lcomp, rcomp;
+            bool lDub, rDub, inc;
 
             start += prop.Length;
             if (!Props.TryGetValue(prop, out prop)) throw new CalcException(start - prop.Length, "Unrecognized field name");
@@ -254,27 +328,28 @@ namespace ConsoleApplication1
             int ct;
             ReflectInfo L, R;
 
-            while (++start < Form.Length && Form[start] == '[')
+            while (++start < Form.Length && (Form[start] == '[' || Form[start] == '|'))
             {
+                inc = Form[start] == '|';
                 comp.Clear();
                 beg = Eval(out start, ++start, -2);
                 if (!beg.IsString() && !beg.IsRange()) start--;
                 while (++start < Form.Length && (Form[start] == ' ' || IsComp(Form[start])))
                     try
                     {
-                        if(Form[start] != ' ') comp.Append(Form[start]);
+                        if (Form[start] != ' ') comp.Append(Form[start]);
                     }
                     catch (ArgumentOutOfRangeException)
                     {
-                        throw new CalcException(start, "Invalid comparisson symbol");
+                        throw new CalcException(start, "Invalid comparison symbol");
                     }
-                if ((ct = CompIndex(comp)) == -1) throw new CalcException(start, "Invalid comparisson symbol");
+                if ((ct = CompIndex(comp)) == -1) throw new CalcException(start, "Invalid comparison symbol");
                 end = Eval(out start, start, -2);
 
                 if (beg.IsString() && end.IsString()) // range + range comp
                 {
                     if (beg == SPECRES) ls = prop;
-                    else if(!Props.TryGetValue(beg.prop.Trim(), out ls)) throw new CalcException(start, "Unrecognized field name");
+                    else if (!Props.TryGetValue(beg.prop.Trim(), out ls)) throw new CalcException(start, "Unrecognized field name");
                     if (end == SPECRES)
                     {
                         start++;
@@ -286,35 +361,36 @@ namespace ConsoleApplication1
                     rDate = rs.ToLower().Contains("date");
                     L = new ReflectInfo(WrapType ?? Typ, ls);
                     R = new ReflectInfo(WrapType ?? Typ, rs);
-                    filtered = filtered.Where(x =>
+                    newFiltered = (inc ? Items : filtered).Where(x =>
                     {
-                        lcomp = ConvertDouble(start, L.GetValue(x, WrapType), lDate);
-                        rcomp = ConvertDouble(start, R.GetValue(x, WrapType), rDate);
-                        return Comp(lcomp, ct, rcomp);
+                        lDub = ConvertUnknown(start, L.GetValue(x, WrapType), lDate, out lcomp);
+                        rDub = ConvertUnknown(start, R.GetValue(x, WrapType), rDate, out rcomp);
+                        return Comp(start, lDub, lcomp, ct, rDub, rcomp);
                     }).ToList();
+                    filtered = inc ? Merge(filtered, newFiltered, K) : newFiltered;
                 }
                 else if (beg.IsString() || end.IsString()) // range + single comp
                 {
                     var temp = beg.IsString() ? beg : end;
-                    //ls = temp == SPECRES ? prop : temp.prop.Trim();
                     if (temp == SPECRES) ls = prop;
                     else if (!Props.TryGetValue(temp.prop.Trim(), out ls)) throw new CalcException(start, "Unrecognized field name");
                     lDate = ls.ToLower().Contains("date");
                     L = new ReflectInfo(WrapType ?? Typ, ls);
-                    var single = (beg.IsString() ? end : beg).value;
+                    rDub = Result.UnknownValue(start, beg.IsString() ? end : beg, out rcomp);
                     if (end.IsString()) // need to flip ct
                     {
                         if (ct < 2) ct = -(ct - 1);
                         else if (ct > 3) ct = 4 - (ct - 5);
-                        if (end == SPECRES) start++;
+                        start++;
                     }
-                    filtered = filtered.Where(x =>
+                    newFiltered = (inc ? Items : filtered).Where(x =>
                     {
-                        lcomp = ConvertDouble(start, L.GetValue(x, WrapType), lDate);
-                        return Comp(lcomp, ct, single);
+                        lDub = ConvertUnknown(start, L.GetValue(x, WrapType), lDate, out lcomp);
+                        return Comp(start, lDub, lcomp, ct, rDub, rcomp);
                     }).ToList();
+                    filtered = inc ? Merge(filtered, newFiltered, K) : newFiltered;
                 }
-                else throw new CalcException(start , "Cannot compare two single values for range bounds");
+                else throw new CalcException(start, "Cannot compare two single values for range bounds");
             }
             foreach (var x in filtered)
             {
@@ -352,8 +428,14 @@ namespace ConsoleApplication1
                         case '(':
                             result = Apply(i, result, op, Eval(out i, i + 1, FuncIndex(word.ToString())));
                             op = ZCHAR;
-                        break;
-                        case ')': case '<': case '>': case '=': case '!': case ']':
+                            break;
+                        case ')':
+                        case '<':
+                        case '>':
+                        case '=':
+                        case '!':
+                        case ']':
+                        case '|':
                             if (func == -2)
                             {
                                 //if (result != null && result.IsRange()) throw new CalcException(i, "Cannot use a range as boundary for another range");
@@ -368,42 +450,42 @@ namespace ConsoleApplication1
                             else if (Form[i] != ')') throw new CalcException(i, "Comparing outside of range definition");
                             if (result == null) throw new CalcException(i, "Reached closing parenthesis without value");
                             if (result.IsRange()) switch (func)
-                            {
-                                //REDUCE//
-                                case 0: // SUM
-                                    var sum = result.range.Values.Sum();
-                                    result = new Result(sum);
-                                break;
-                                case 1: // AVG (mean)
-                                    var avg = result.range.Values.Sum() / result.range.Count();
-                                    result = new Result(avg);
-                                break;
-                                case 2: // MED
-                                    var med = result.range.Values.OrderBy(x => x).ToList();
-                                    result = new Result(med[med.Count / 2]);
-                                break;
-                                case 3: // MODE
-                                    var counts = new Dictionary<double, int>();
-                                    foreach (var x in result.range.Values)
-                                        if (counts.ContainsKey(x)) counts[x]++;
-                                        else counts[x] = 1;
-                                    var mode = counts.Aggregate(new KeyValuePair<double, int>(0, 0), (m, x) => m.Value > x.Value ? m : x);
-                                    result = new Result(mode.Key);
-                                break;
-                                //APPLY EACH//
-                                case 10: // ROUND
-                                    foreach (var k in result.range.Keys) result.range[k] = Math.Round(result.range[k]);
-                                break;
-                                case 11: // FLOOR
-                                    foreach (var k in result.range.Keys) result.range[k] = Math.Floor(result.range[k]);
-                                break;
-                                case 12: // CEIL
-                                    foreach (var k in result.range.Keys) result.range[k] = Math.Ceiling(result.range[k]);
-                                break;
-                                case 13: // NEG
-                                    foreach (var k in result.range.Keys) result.range[k] = -result.range[k];
-                                break;
-                            }
+                                {
+                                    //REDUCE//
+                                    case 0: // SUM
+                                        var sum = result.range.Values.Sum();
+                                        result = new Result(sum);
+                                        break;
+                                    case 1: // AVG (mean)
+                                        var avg = result.range.Values.Sum() / result.range.Count();
+                                        result = new Result(avg);
+                                        break;
+                                    case 2: // MED
+                                        var med = result.range.Values.OrderBy(x => x).ToList();
+                                        result = new Result(med[med.Count / 2]);
+                                        break;
+                                    case 3: // MODE
+                                        var counts = new Dictionary<double, int>();
+                                        foreach (var x in result.range.Values)
+                                            if (counts.ContainsKey(x)) counts[x]++;
+                                            else counts[x] = 1;
+                                        var mode = counts.Aggregate(new KeyValuePair<double, int>(0, 0), (m, x) => m.Value > x.Value ? m : x);
+                                        result = new Result(mode.Key);
+                                        break;
+                                    //APPLY EACH//
+                                    case 10: // ROUND
+                                        foreach (var k in result.range.Keys) result.range[k] = Math.Round(result.range[k]);
+                                        break;
+                                    case 11: // FLOOR
+                                        foreach (var k in result.range.Keys) result.range[k] = Math.Floor(result.range[k]);
+                                        break;
+                                    case 12: // CEIL
+                                        foreach (var k in result.range.Keys) result.range[k] = Math.Ceiling(result.range[k]);
+                                        break;
+                                    case 13: // NEG
+                                        foreach (var k in result.range.Keys) result.range[k] = -result.range[k];
+                                        break;
+                                }
                             else if (func > 9)
                             {
                                 keySave = result.range.Keys.First();
@@ -411,35 +493,44 @@ namespace ConsoleApplication1
                                 {
                                     case 10: // ROUND
                                         result.range[keySave] = Math.Round(result.range[keySave]);
-                                    break;
+                                        break;
                                     case 11: // FLOOR
                                         result.range[keySave] = Math.Floor(result.range[keySave]);
-                                    break;
+                                        break;
                                     case 12: // CEIL
                                         result.range[keySave] = Math.Ceiling(result.range[keySave]);
-                                    break;
+                                        break;
                                     case 13: // NEG
                                         result.range[keySave] = -result.range[keySave];
-                                    break;
+                                        break;
                                 }
                             }
                             else throw new CalcException(i, "Cannot apply reducing functions to single values");
                             end = i;
                             return result;
-                        case '"':
+                        case '\'':
                             if (func == -2)
                             {
-                                var filt = Form.Substring(++i, Form.IndexOf('"', i) - i);
+                                var filt = Form.Substring(++i, Form.IndexOf('\'', i) - i);
                                 result = new Result(null, filt.Trim());
                                 end = i + filt.Length;
                                 return result;
                             }
                             else result = Apply(i, result, op, GetRange(i, out i));
                             op = ZCHAR;
-                        break;
-                        case '+': case '-': case '*': case '/':
+                            break;
+                        case '"':
+                            var str = Form.Substring(++i, Form.IndexOf('"', i) - i);
+                            result = Apply(i, result, op, new Result(Result.SPECDICT, str.Trim()));
+                            i += str.Length;
+                            op = ZCHAR;
+                            break;
+                        case '+':
+                        case '-':
+                        case '*':
+                        case '/':
                             op = Form[i];
-                        break;
+                            break;
                     }
                     word.Clear();
                 }
