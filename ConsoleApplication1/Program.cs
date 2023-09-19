@@ -32,10 +32,8 @@ namespace ConsoleApplication1
                 new Record("Doofus", 24)
             };
 
-            var calc = new Calc<Record>(new Dictionary<string, string> { { "Id", "id" }, { "Age", "age" } }, null, true);
-
-            var total = calc.Do("NEG(9) + SUM(\"Age\"[\"Id\" <= 2][20 <= this]) / 2", list);
-
+            var calc = new Calc<Record>(null, true);
+            var total = calc.Do("NEG(9) + SUM('age'[ 'name' = \"Ricky\" || 'name' = \"Doofus\" ]) / 2", list);
             Console.WriteLine(total);
         }
     }
