@@ -529,6 +529,7 @@ namespace ConsoleApplication1
                         case '-':
                         case '*':
                         case '/':
+                        case '%':
                             op = Form[i];
                             break;
                     }
